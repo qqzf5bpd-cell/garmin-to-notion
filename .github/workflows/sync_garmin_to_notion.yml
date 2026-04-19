@@ -34,9 +34,9 @@ jobs:
 
       - name: Garmin → Notion 同期
         env:
-          GARMIN_EMAIL:       ${{ qqzf5bpd@gmail.com }}
-          GARMIN_PASSWORD:    ${{ A1644a1644 }}
-          NOTION_TOKEN:       ${{ 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 }}
-          NOTION_SLEEP_DB_ID: ${{ 6273deb5314b41a4bb63c8a0ab0fb34e }}
+          GARMIN_EMAIL:       ${{ secrets.qqzf5bpd@gmail.com }}
+          GARMIN_PASSWORD:    ${{ secrets.A1644a1644 }}
+          NOTION_TOKEN:       ${{ secrets.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 }}
+          NOTION_SLEEP_DB_ID: ${{ secrets.6273deb5314b41a4bb63c8a0ab0fb34e }}
           TZ: 'Asia/Tokyo'
         run: python sleep-data.py
