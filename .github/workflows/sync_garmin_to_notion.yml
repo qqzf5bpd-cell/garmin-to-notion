@@ -1,20 +1,21 @@
-name: Sync Garmin to Notion
+name: Garmin → Notion 日次同期
 
 on:
   schedule:
-    - cron: '0 1 * * *' # Daily
-  workflow_dispatch:
-env:
-  TZ: 'America/Montreal'
+    - cron: '0 21 * * *'   # 毎日 UTC 21:00 = JST 翌朝 06:00（昨日のデータを取得）
+  workflow_dispatch:         # 手動実行ボタン
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      TZ: 'Asia/Tokyo'
+
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -31,19 +32,11 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
 
-      - name: Run script
+      - name: Garmin → Notion 同期
         env:
-          GARMIN_EMAIL: ${{ qqzf5bpd@gmail.com }}
-          GARMIN_PASSWORD: ${{ A1644a1644 }}
-          NOTION_TOKEN: ${{ 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 }}
-          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
-          NOTION_PR_DB_ID: ${{ secrets.NOTION_PR_DB_ID }}
-          NOTION_STEPS_DB_ID: ${{ secrets.NOTION_STEPS_DB_ID }}
+          GARMIN_EMAIL:       ${{ qqzf5bpd@gmail.com }}
+          GARMIN_PASSWORD:    ${{ A1644a1644 }}
+          NOTION_TOKEN:       ${{ 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 }}
           NOTION_SLEEP_DB_ID: ${{ 6273deb5314b41a4bb63c8a0ab0fb34e }}
-          GARMIN_ACTIVITIES_FETCH_LIMIT: ${{ vars.GARMIN_ACTIVITIES_FETCH_LIMIT }}
-          TZ: 'America/Montreal'
-        run: |
-          python garmin-activities.py
-          python personal-records.py
-          python daily-steps.py
-          python sleep-data.py
+          TZ: 'Asia/Tokyo'
+        run: python sleep-data.py
