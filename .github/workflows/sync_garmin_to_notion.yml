@@ -2,18 +2,6 @@ name: Garmin → Notion 日次同期
 
 on:
   schedule:
-    - cron: '0 21 * * *'   # 毎日 UTC 21:00 = JST 翌朝 06:00（昨日のデータを取得）
-  workflow_dispatch:         # 手動実行ボタン
-
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    env:
-      TZ: 'Asia/Tokyo'
-name: Garmin → Notion 日次同期
-
-on:
-  schedule:
     - cron: '0 21 * * *'
   workflow_dispatch:
 
@@ -49,33 +37,4 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_SLEEP_DB_ID: ${{ secrets.NOTION_SLEEP_DB_ID }}
           TZ: Asia/Tokyo
-        run: python sleep-data.py
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache pip packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-
-      - name: Garmin → Notion 同期
-        env:
-          GARMIN_EMAIL:       ${{ secrets.qqzf5bpd@gmail.com }}
-          GARMIN_PASSWORD:    ${{ secrets.A1644a1644 }}
-          NOTION_TOKEN:       ${{ secrets.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 }}
-          NOTION_SLEEP_DB_ID: ${{ secrets.6273deb5314b41a4bb63c8a0ab0fb34e }}
-          TZ: 'Asia/Tokyo'
-        run: python sleep-data.py
+        run: python sleep-data.
