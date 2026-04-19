@@ -33,13 +33,13 @@ jobs:
 
       - name: Run script
         env:
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          GARMIN_EMAIL: ${{ qqzf5bpd@gmail.com }}
+          GARMIN_PASSWORD: ${{ A1644a1644 }}
+          NOTION_TOKEN: ${{ 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 }}
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
           NOTION_PR_DB_ID: ${{ secrets.NOTION_PR_DB_ID }}
           NOTION_STEPS_DB_ID: ${{ secrets.NOTION_STEPS_DB_ID }}
-          NOTION_SLEEP_DB_ID: ${{ secrets.NOTION_SLEEP_DB_ID }}
+          NOTION_SLEEP_DB_ID: ${{ 6273deb5314b41a4bb63c8a0ab0fb34e }}
           GARMIN_ACTIVITIES_FETCH_LIMIT: ${{ vars.GARMIN_ACTIVITIES_FETCH_LIMIT }}
           TZ: 'America/Montreal'
         run: |
