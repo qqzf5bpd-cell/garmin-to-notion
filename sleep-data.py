@@ -1,103 +1,130 @@
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from garminconnect import Garmin
 from notion_client import Client
-from dotenv import load_dotenv, dotenv_values
-import pytz
+from dotenv import load_dotenv
 import os
 
-# Constants
-local_tz = pytz.timezone("America/New_York")
-
-# Load environment variables
 load_dotenv()
-CONFIG = dotenv_values()
 
-def get_sleep_data(garmin):
-    today = datetime.today().date()
-    return garmin.get_sleep_data(today.isoformat())
+def get_garmin_client():
+    g = Garmin(os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD"))
+    g.login()
+    return g
 
-def format_duration(seconds):
-    minutes = (seconds or 0) // 60
-    return f"{minutes // 60}h {minutes % 60}m"
-
-def format_time(timestamp):
-    return (
-        datetime.utcfromtimestamp(timestamp / 1000).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        if timestamp else None
+def find_journal_entry(client, db_id, target_date: str):
+    """日次ジャーナルDBから対象日付のエントリを検索"""
+    # 日付プロパティ名は実際のDBに合わせて調整
+    res = client.databases.query(
+        database_id=db_id,
+        filter={"property": "日付", "date": {"equals": target_date}}
     )
+    results = res.get("results", [])
+    return results[0]["id"] if results else None
 
-def format_time_readable(timestamp):
-    return (
-        datetime.fromtimestamp(timestamp / 1000, local_tz).strftime("%H:%M")
-        if timestamp else "Unknown"
-    )
+def update_or_create_entry(client, db_id, target_date: str, props: dict):
+    """エントリが存在すれば更新、なければ作成"""
+    page_id = find_journal_entry(client, db_id, target_date)
+    if page_id:
+        client.pages.update(page_id=page_id, properties=props)
+        print(f"✅ 更新: {target_date}")
+    else:
+        # 新規作成（タイトルも設定）
+        props["日付"] = {"date": {"start": target_date}}
+        client.pages.create(
+            parent={"database_id": db_id},
+            properties=props,
+            icon={"emoji": "📔"}
+        )
+        print(f"✅ 新規作成: {target_date}")
 
-def format_date_for_name(sleep_date):
-    return datetime.strptime(sleep_date, "%Y-%m-%d").strftime("%d.%m.%Y") if sleep_date else "Unknown"
-
-def sleep_data_exists(client, database_id, sleep_date):
-    query = client.databases.query(
-        database_id=database_id,
-        filter={"property": "Long Date", "date": {"equals": sleep_date}}
-    )
-    results = query.get('results', [])
-    return results[0] if results else None  # Ensure it returns None instead of causing IndexError
-
-def create_sleep_data(client, database_id, sleep_data, skip_zero_sleep=True):
-    daily_sleep = sleep_data.get('dailySleepDTO', {})
-    if not daily_sleep:
-        return
-    
-    sleep_date = daily_sleep.get('calendarDate', "Unknown Date")
-    total_sleep = sum(
-        (daily_sleep.get(k, 0) or 0) for k in ['deepSleepSeconds', 'lightSleepSeconds', 'remSleepSeconds']
-    )
-    
-    
-    if skip_zero_sleep and total_sleep == 0:
-        print(f"Skipping sleep data for {sleep_date} as total sleep is 0")
+def sync_sleep(garmin, client, db_id, target_date: str):
+    data = garmin.get_sleep_data(target_date)
+    dto = data.get("dailySleepDTO", {})
+    if not dto:
+        print("睡眠データなし")
         return
 
-    properties = {
-        "Date": {"title": [{"text": {"content": format_date_for_name(sleep_date)}}]},
-        "Times": {"rich_text": [{"text": {"content": f"{format_time_readable(daily_sleep.get('sleepStartTimestampGMT'))} → {format_time_readable(daily_sleep.get('sleepEndTimestampGMT'))}"}}]},
-        "Long Date": {"date": {"start": sleep_date}},
-        "Full Date/Time": {"date": {"start": format_time(daily_sleep.get('sleepStartTimestampGMT')), "end": format_time(daily_sleep.get('sleepEndTimestampGMT'))}},
-        "Total Sleep (h)": {"number": round(total_sleep / 3600, 1)},
-        "Light Sleep (h)": {"number": round(daily_sleep.get('lightSleepSeconds', 0) / 3600, 1)},
-        "Deep Sleep (h)": {"number": round(daily_sleep.get('deepSleepSeconds', 0) / 3600, 1)},
-        "REM Sleep (h)": {"number": round(daily_sleep.get('remSleepSeconds', 0) / 3600, 1)},
-        "Awake Time (h)": {"number": round(daily_sleep.get('awakeSleepSeconds', 0) / 3600, 1)},
-        "Total Sleep": {"rich_text": [{"text": {"content": format_duration(total_sleep)}}]},
-        "Light Sleep": {"rich_text": [{"text": {"content": format_duration(daily_sleep.get('lightSleepSeconds', 0))}}]},
-        "Deep Sleep": {"rich_text": [{"text": {"content": format_duration(daily_sleep.get('deepSleepSeconds', 0))}}]},
-        "REM Sleep": {"rich_text": [{"text": {"content": format_duration(daily_sleep.get('remSleepSeconds', 0))}}]},
-        "Awake Time": {"rich_text": [{"text": {"content": format_duration(daily_sleep.get('awakeSleepSeconds', 0))}}]},
-        "Resting HR": {"number": sleep_data.get('restingHeartRate', 0)}
+    deep   = (dto.get("deepSleepSeconds")  or 0) / 3600
+    light  = (dto.get("lightSleepSeconds") or 0) / 3600
+    rem    = (dto.get("remSleepSeconds")   or 0) / 3600
+    total  = deep + light + rem
+    rhr    = data.get("restingHeartRate", 0) or 0
+
+    # 睡眠スコア（存在する場合）
+    score_obj = dto.get("sleepScores") or {}
+    sleep_score = score_obj.get("overall", {}).get("value") if isinstance(score_obj, dict) else None
+
+    props = {
+        "睡眠時間_Garmin": {"number": round(total, 1)},
+        "深い睡眠":        {"number": round(deep,  1)},
+        "浅い睡眠":        {"number": round(light, 1)},
+        "レム睡眠":        {"number": round(rem,   1)},
+        "安静時心拍数":    {"number": rhr},
     }
-    
-    client.pages.create(parent={"database_id": database_id}, properties=properties, icon={"emoji": "😴"})
-    print(f"Created sleep entry for: {sleep_date}")
+    if sleep_score is not None:
+        props["睡眠スコア"] = {"number": sleep_score}
+
+    update_or_create_entry(client, db_id, target_date, props)
+
+def sync_hrv(garmin, client, db_id, target_date: str):
+    try:
+        data = garmin.get_hrv_data(target_date)
+        hrv_val = None
+        if data and "hrvSummary" in data:
+            hrv_val = data["hrvSummary"].get("lastNight") or data["hrvSummary"].get("weeklyAvg")
+        if hrv_val:
+            page_id = find_journal_entry(client, db_id, target_date)
+            if page_id:
+                client.pages.update(page_id=page_id, properties={"HRV": {"number": hrv_val}})
+                print(f"✅ HRV更新: {hrv_val}")
+    except Exception as e:
+        print(f"HRVデータ取得失敗: {e}")
+
+def sync_body_battery(garmin, client, db_id, target_date: str):
+    try:
+        data = garmin.get_body_battery(target_date)
+        if data and len(data) > 0:
+            values = [d.get("charged") or d.get("bodyBatteryLevel", 0) for d in data if d]
+            values = [v for v in values if v]
+            if values:
+                bb_start = values[0]
+                bb_end   = values[-1]
+                page_id = find_journal_entry(client, db_id, target_date)
+                if page_id:
+                    client.pages.update(page_id=page_id, properties={
+                        "Body Battery 開始": {"number": bb_start},
+                        "Body Battery 終了": {"number": bb_end},
+                    })
+                    print(f"✅ Body Battery: {bb_start} → {bb_end}")
+    except Exception as e:
+        print(f"Body Batteryデータ取得失敗: {e}")
+
+def sync_steps(garmin, client, db_id, target_date: str):
+    try:
+        data = garmin.get_steps_data(target_date)
+        total_steps = sum(d.get("steps", 0) or 0 for d in data) if data else 0
+        if total_steps > 0:
+            page_id = find_journal_entry(client, db_id, target_date)
+            if page_id:
+                client.pages.update(page_id=page_id, properties={"歩数": {"number": total_steps}})
+                print(f"✅ 歩数: {total_steps:,}")
+    except Exception as e:
+        print(f"歩数データ取得失敗: {e}")
 
 def main():
-    load_dotenv()
+    target_date = (date.today() - timedelta(days=1)).isoformat()  # 昨日のデータ
+    # 当日データが欲しい場合: target_date = date.today().isoformat()
 
-    # Initialize Garmin and Notion clients using environment variables
-    garmin_email = os.getenv("GARMIN_EMAIL")
-    garmin_password = os.getenv("GARMIN_PASSWORD")
-    notion_token = os.getenv("NOTION_TOKEN")
-    database_id = os.getenv("NOTION_SLEEP_DB_ID")
+    db_id  = os.getenv("NOTION_SLEEP_DB_ID")  # 日次ジャーナルDB ID
+    client = Client(auth=os.getenv("NOTION_TOKEN"))
+    garmin = get_garmin_client()
 
-    # Initialize Garmin client and login
-    garmin = Garmin(garmin_email, garmin_password)
-    garmin.login()
-    client = Client(auth=notion_token)
+    print(f"📅 同期対象日: {target_date}")
+    sync_sleep(garmin, client, db_id, target_date)
+    sync_hrv(garmin, client, db_id, target_date)
+    sync_body_battery(garmin, client, db_id, target_date)
+    sync_steps(garmin, client, db_id, target_date)
+    print("🎉 同期完了")
 
-    data = get_sleep_data(garmin)
-    if data:
-        sleep_date = data.get('dailySleepDTO', {}).get('calendarDate')
-        if sleep_date and not sleep_data_exists(client, database_id, sleep_date):
-            create_sleep_data(client, database_id, data, skip_zero_sleep=True)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
