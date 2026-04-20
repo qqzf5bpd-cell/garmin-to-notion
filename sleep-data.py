@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 import os
+import json
 import garth
+from garth.auth_tokens import OAuth2Token
 from garminconnect import Garmin
 from notion_client import Client
 from dotenv import load_dotenv
@@ -13,7 +15,11 @@ def get_garmin_client():
     tokens = os.getenv("GARMIN_TOKENS")
     if tokens:
         try:
-            garth.client.loads(tokens)
+            token_data = json.loads(tokens)
+            oauth2_data = token_data.get("oauth2_token")
+            if not oauth2_data:
+                raise ValueError("OAuth2\u30c8\u30fc\u30af\u30f3\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093")
+            garth.client.oauth2_token = OAuth2Token(**oauth2_data)
             g = Garmin()
             g.garth = garth.client
             print("✅ 保存済みトークンでログイン成功")
