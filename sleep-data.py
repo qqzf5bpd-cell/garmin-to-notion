@@ -57,75 +57,104 @@ DP_DATE  = "日付"
 # Garmin 認証
 # ──────────────────────────────────────────────────────
 
-def _extract_oauth2_dict(token_data) -> dict:
-    """garth の様々なバージョン・形式の dump 出力から oauth2 部分を抜き出す。
+def _try_load_tokens(raw: str) -> bool:
+    """様々な形式の GARMIN_TOKENS を試して garth.client にロードする。
 
-    対応する形式：
-    - {"oauth1_token": {...}, "oauth2_token": {...}}   ← 旧 garth
-    - [oauth1_dict, oauth2_dict]                         ← 新 garth (.dumps() 出力)
-    - {...oauth2 fields directly...}                      ← oauth2 のみのケース
+    試す順序：
+    1. garth.client.loads(raw)：canonical 形式（[oauth1, oauth2] dict 2 要素 list）
+    2. dict 形式 {"oauth2_token": {...}}：旧 garth
+    3. list 形式で [1] が JSON 文字列のパターン：1 文字列を dict にパースしてから
     """
-    if isinstance(token_data, dict):
-        if "oauth2_token" in token_data:
-            return token_data["oauth2_token"]
-        if "access_token" in token_data:
-            return token_data
-        raise ValueError(
-            f"GARMIN_TOKENS dict に oauth2_token も access_token も無い: keys={list(token_data.keys())}"
-        )
+    last_err: Exception | None = None
+
+    # 試行 1：garth 純正
+    try:
+        garth.client.loads(raw)
+        if garth.client.oauth2_token is not None:
+            return True
+    except Exception as e:
+        last_err = e
+
+    # 試行 2 以降：JSON 解析して手動マッピング
+    try:
+        token_data = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError(f"GARMIN_TOKENS が JSON として解析できません: {e}") from e
+
+    # 試行 2：dict {"oauth2_token": {...}}
+    if isinstance(token_data, dict) and "oauth2_token" in token_data:
+        oauth2_data = token_data["oauth2_token"]
+        if isinstance(oauth2_data, str):
+            oauth2_data = json.loads(oauth2_data)
+        return _set_oauth2_from_dict(oauth2_data)
+
+    # 試行 3：dict が直に oauth2
+    if isinstance(token_data, dict) and "access_token" in token_data:
+        return _set_oauth2_from_dict(token_data)
+
+    # 試行 4：list 形式の各種
     if isinstance(token_data, list):
-        if len(token_data) >= 2 and isinstance(token_data[1], dict):
-            return token_data[1]
-        # 単一要素 list で、それが oauth2 dict のケースもある
-        if len(token_data) == 1 and isinstance(token_data[0], dict) and "access_token" in token_data[0]:
-            return token_data[0]
-        raise ValueError(f"GARMIN_TOKENS list の形式が認識不能: len={len(token_data)}")
-    raise ValueError(f"GARMIN_TOKENS は dict または list である必要があります: type={type(token_data).__name__}")
+        for i, item in enumerate(token_data):
+            inner = item
+            # 文字列なら JSON パース試行
+            if isinstance(inner, str):
+                try:
+                    inner = json.loads(inner)
+                except Exception:
+                    continue
+            if isinstance(inner, dict) and "access_token" in inner:
+                return _set_oauth2_from_dict(inner)
+        # ここまでで見つからない場合は詳細エラー
+        types = [type(x).__name__ for x in token_data]
+        raise RuntimeError(
+            f"GARMIN_TOKENS list 内に oauth2 dict が見つかりません。要素型：{types}。"
+            f"（最初の試行 garth.client.loads() のエラー：{last_err}）"
+        )
+
+    raise RuntimeError(f"GARMIN_TOKENS の構造が不明: type={type(token_data).__name__}")
+
+
+def _set_oauth2_from_dict(oauth2_data: dict) -> bool:
+    """OAuth2Token のコンストラクタ既知フィールドのみフィルタしてセット。"""
+    import inspect
+    sig = inspect.signature(OAuth2Token)
+    allowed = set(sig.parameters.keys())
+    filtered = {k: v for k, v in oauth2_data.items() if k in allowed}
+    garth.client.oauth2_token = OAuth2Token(**filtered)
+    return True
 
 
 def get_garmin_client() -> Garmin:
-    """OAuth2 トークンがあればそれを使い、なければメール/パスワードでログイン。
+    """OAuth2 トークンを使って Garmin クライアントを生成する。
 
-    GitHub Actions では IP がブロックされやすいため、トークン経由が必須。
+    GitHub Actions では IP が Garmin/Cloudflare でブロックされ、パスワード/MFA
+    認証は不可能（CAPTCHA 要求や 429 が返る）。よって GARMIN_TOKENS は必須。
     """
     tokens = os.getenv("GARMIN_TOKENS")
-    if tokens:
-        try:
-            try:
-                raw = base64.b64decode(tokens).decode()
-            except Exception:
-                raw = tokens
-            token_data = json.loads(raw)
-            oauth2_data = _extract_oauth2_dict(token_data)
-            # OAuth2Token は dataclass（または attrs）。コンストラクタ既知フィールドのみ渡す。
-            import inspect
-            sig = inspect.signature(OAuth2Token)
-            allowed = set(sig.parameters.keys())
-            filtered = {k: v for k, v in oauth2_data.items() if k in allowed}
-            garth.client.oauth2_token = OAuth2Token(**filtered)
-            g = Garmin()
-            g.garth = garth.client
-            print("✅ 保存済みトークンでログイン成功")
-            return g
-        except Exception as e:
-            print(f"⚠️ トークンロード失敗: {e}、パスワードでログインを試行...")
-
-    # フォールバック：メール/パスワード
-    # 注意：GitHub Actions の IP は Garmin/Cloudflare でブロックされやすい。
-    #       本番環境では GARMIN_TOKENS の利用を強く推奨。
-    def prompt_mfa():
-        raise RuntimeError("MFA が必要です。get_garmin_tokens.py でトークンを生成してください")
-
-    email    = os.getenv("GARMIN_EMAIL")
-    password = os.getenv("GARMIN_PASSWORD")
-    if not email or not password:
+    if not tokens:
         raise RuntimeError(
-            "GARMIN_TOKENS（推奨）または GARMIN_EMAIL/GARMIN_PASSWORD を設定してください。"
-            " GitHub Actions では IP ブロック回避のため GARMIN_TOKENS の利用を強く推奨。"
+            "GARMIN_TOKENS が未設定です。GitHub Actions ではパスワード認証は使えないため、"
+            "ローカル PC で `python garmin/generate_garmin_tokens.py` を実行してトークンを生成し、"
+            "出力された base64 文字列を GitHub Secrets の GARMIN_TOKENS に設定してください。"
         )
-    g = Garmin(email=email, password=password, prompt_mfa=prompt_mfa)
-    g.login()
-    print("✅ パスワードでログイン成功")
+
+    try:
+        raw = base64.b64decode(tokens).decode()
+    except Exception:
+        raw = tokens
+
+    try:
+        _try_load_tokens(raw)
+    except Exception as e:
+        raise RuntimeError(
+            f"GARMIN_TOKENS のロードに失敗しました：{e}\n"
+            "対処：ローカル PC で `python garmin/generate_garmin_tokens.py` を実行し、"
+            "出力された base64 文字列で GitHub Secrets の GARMIN_TOKENS を更新してください。"
+        ) from e
+
+    g = Garmin()
+    g.garth = garth.client
+    print("✅ 保存済みトークンでログイン成功")
     return g
 
 
