@@ -290,21 +290,42 @@ def update_garmin(client: Client, page_id: str, props: dict) -> None:
 
 def sync_sleep(garmin: Garmin, client: Client, garmin_page_id: str, target_date: str) -> None:
     data = garmin.get_sleep_data(target_date)
-    dto  = data.get("dailySleepDTO", {})
+    dto  = data.get("dailySleepDTO", {}) or {}
     if not dto:
-        print("⚠️ 睡眠データなし")
+        print(f"⚠️ 睡眠データなし（response keys = {list(data.keys()) if data else 'None'}）")
         return
 
-    deep  = (dto.get("deepSleepSeconds")  or 0) / 3600
-    light = (dto.get("lightSleepSeconds") or 0) / 3600
-    rem   = (dto.get("remSleepSeconds")   or 0) / 3600
+    # フィールド名のフォールバック（Garmin API のバージョン差吸収）
+    def _get_num(d: dict, *keys, default: float = 0.0) -> float:
+        for k in keys:
+            v = d.get(k)
+            if v is not None:
+                return float(v)
+        return default
+
+    deep_s  = _get_num(dto, "deepSleepSeconds", "deep_sleep_seconds", "deepSleepDurationInSeconds")
+    light_s = _get_num(dto, "lightSleepSeconds", "light_sleep_seconds", "lightSleepDurationInSeconds")
+    rem_s   = _get_num(dto, "remSleepSeconds", "rem_sleep_seconds", "remSleepDurationInSeconds")
+
+    deep  = deep_s  / 3600
+    light = light_s / 3600
+    rem   = rem_s   / 3600
     total = deep + light + rem
-    rhr   = data.get("restingHeartRate", 0) or 0
+
+    # 念のため：sleepTimeSeconds（合計）が API にあれば優先
+    total_s_alt = _get_num(dto, "sleepTimeSeconds", "totalSleepDurationSeconds")
+    if total_s_alt > 0 and total == 0:
+        total = total_s_alt / 3600
+
+    rhr = data.get("restingHeartRate", 0) or 0
 
     score_obj   = dto.get("sleepScores") or {}
     sleep_score = (
         score_obj.get("overall", {}).get("value") if isinstance(score_obj, dict) else None
     )
+
+    if total == 0 and sleep_score is None:
+        print(f"⚠️ 睡眠合計 0h かつスコアなし — DTO の主要キー：{list(dto.keys())[:15]}")
 
     props = {
         GP_TOTAL_SLEEP: {"number": round(total, 1)},
@@ -334,21 +355,42 @@ def sync_hrv(garmin: Garmin, client: Client, garmin_page_id: str, target_date: s
 
 
 def sync_body_battery(garmin: Garmin, client: Client, garmin_page_id: str, target_date: str) -> None:
+    """Body Battery の 1 日の最高値・最低値を抽出。
+
+    Garmin API レスポンスは `bodyBatteryValuesArray` の中に
+    [timestamp_ms, status, level] の triple が時系列で入っている。
+    `charged` / `drained` フィールドは「日の充電量・消費量」（増分）であり、
+    実レベルではないので使わない。
+    """
     try:
         data = garmin.get_body_battery(target_date)
         if not data:
+            print("⚠️ Body Battery データなし")
             return
-        values = [d.get("charged") or d.get("bodyBatteryLevel", 0) for d in data if d]
-        values = [v for v in values if v]
-        if not values:
+
+        all_levels: list[int] = []
+        for day_data in data:
+            if not day_data:
+                continue
+            arr = day_data.get("bodyBatteryValuesArray") or []
+            for entry in arr:
+                if isinstance(entry, list) and len(entry) >= 3:
+                    level = entry[2]
+                    if isinstance(level, (int, float)) and level > 0:
+                        all_levels.append(int(level))
+
+        if not all_levels:
+            print(f"⚠️ Body Battery：bodyBatteryValuesArray が空（data keys = "
+                  f"{[list(d.keys())[:5] for d in data if d]}）")
             return
-        bb_high = max(values)
-        bb_low  = min(values)
+
+        bb_high = max(all_levels)
+        bb_low  = min(all_levels)
         update_garmin(client, garmin_page_id, {
             GP_BB_HIGHEST: {"number": bb_high},
             GP_BB_LOWEST:  {"number": bb_low},
         })
-        print(f"✅ Body Battery：最高 {bb_high} / 最低 {bb_low}")
+        print(f"✅ Body Battery：最高 {bb_high} / 最低 {bb_low}（{len(all_levels)} データ点）")
     except Exception as e:
         print(f"⚠️ Body Batteryデータ取得失敗：{e}")
 
