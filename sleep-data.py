@@ -57,8 +57,37 @@ DP_DATE  = "日付"
 # Garmin 認証
 # ──────────────────────────────────────────────────────
 
+def _extract_oauth2_dict(token_data) -> dict:
+    """garth の様々なバージョン・形式の dump 出力から oauth2 部分を抜き出す。
+
+    対応する形式：
+    - {"oauth1_token": {...}, "oauth2_token": {...}}   ← 旧 garth
+    - [oauth1_dict, oauth2_dict]                         ← 新 garth (.dumps() 出力)
+    - {...oauth2 fields directly...}                      ← oauth2 のみのケース
+    """
+    if isinstance(token_data, dict):
+        if "oauth2_token" in token_data:
+            return token_data["oauth2_token"]
+        if "access_token" in token_data:
+            return token_data
+        raise ValueError(
+            f"GARMIN_TOKENS dict に oauth2_token も access_token も無い: keys={list(token_data.keys())}"
+        )
+    if isinstance(token_data, list):
+        if len(token_data) >= 2 and isinstance(token_data[1], dict):
+            return token_data[1]
+        # 単一要素 list で、それが oauth2 dict のケースもある
+        if len(token_data) == 1 and isinstance(token_data[0], dict) and "access_token" in token_data[0]:
+            return token_data[0]
+        raise ValueError(f"GARMIN_TOKENS list の形式が認識不能: len={len(token_data)}")
+    raise ValueError(f"GARMIN_TOKENS は dict または list である必要があります: type={type(token_data).__name__}")
+
+
 def get_garmin_client() -> Garmin:
-    """OAuth2 トークンがあればそれを使い、なければメール/パスワードでログイン。"""
+    """OAuth2 トークンがあればそれを使い、なければメール/パスワードでログイン。
+
+    GitHub Actions では IP がブロックされやすいため、トークン経由が必須。
+    """
     tokens = os.getenv("GARMIN_TOKENS")
     if tokens:
         try:
@@ -67,10 +96,13 @@ def get_garmin_client() -> Garmin:
             except Exception:
                 raw = tokens
             token_data = json.loads(raw)
-            oauth2_data = token_data.get("oauth2_token")
-            if not oauth2_data:
-                raise ValueError("OAuth2 トークンが見つかりません")
-            garth.client.oauth2_token = OAuth2Token(**oauth2_data)
+            oauth2_data = _extract_oauth2_dict(token_data)
+            # OAuth2Token は dataclass（または attrs）。コンストラクタ既知フィールドのみ渡す。
+            import inspect
+            sig = inspect.signature(OAuth2Token)
+            allowed = set(sig.parameters.keys())
+            filtered = {k: v for k, v in oauth2_data.items() if k in allowed}
+            garth.client.oauth2_token = OAuth2Token(**filtered)
             g = Garmin()
             g.garth = garth.client
             print("✅ 保存済みトークンでログイン成功")
@@ -79,14 +111,19 @@ def get_garmin_client() -> Garmin:
             print(f"⚠️ トークンロード失敗: {e}、パスワードでログインを試行...")
 
     # フォールバック：メール/パスワード
+    # 注意：GitHub Actions の IP は Garmin/Cloudflare でブロックされやすい。
+    #       本番環境では GARMIN_TOKENS の利用を強く推奨。
     def prompt_mfa():
         raise RuntimeError("MFA が必要です。get_garmin_tokens.py でトークンを生成してください")
 
-    g = Garmin(
-        email=os.getenv("GARMIN_EMAIL"),
-        password=os.getenv("GARMIN_PASSWORD"),
-        prompt_mfa=prompt_mfa,
-    )
+    email    = os.getenv("GARMIN_EMAIL")
+    password = os.getenv("GARMIN_PASSWORD")
+    if not email or not password:
+        raise RuntimeError(
+            "GARMIN_TOKENS（推奨）または GARMIN_EMAIL/GARMIN_PASSWORD を設定してください。"
+            " GitHub Actions では IP ブロック回避のため GARMIN_TOKENS の利用を強く推奨。"
+        )
+    g = Garmin(email=email, password=password, prompt_mfa=prompt_mfa)
     g.login()
     print("✅ パスワードでログイン成功")
     return g
