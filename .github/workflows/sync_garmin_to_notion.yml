@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Cache pip packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -32,10 +32,14 @@ jobs:
 
       - name: Garmin → Notion 同期
         env:
-          GARMIN_EMAIL:       ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD:    ${{ secrets.GARMIN_PASSWORD }}
-          GARMIN_TOKENS:      ${{ secrets.GARMIN_TOKENS }}
-          NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
-          NOTION_SLEEP_DB_ID: ${{ secrets.NOTION_SLEEP_DB_ID }}
+          GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
+          GARMIN_TOKENS:       ${{ secrets.GARMIN_TOKENS }}
+          NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
+          # ★ v5.4 で追加（必須）
+          NOTION_GARMIN_DB_ID: ${{ secrets.NOTION_GARMIN_DB_ID }}
+          NOTION_DAILY_DB_ID:  ${{ secrets.NOTION_DAILY_DB_ID }}
+          # 後方互換（NOTION_GARMIN_DB_ID が未設定の場合のフォールバック）
+          NOTION_SLEEP_DB_ID:  ${{ secrets.NOTION_SLEEP_DB_ID }}
           TZ: Asia/Tokyo
         run: python sleep-data.py
