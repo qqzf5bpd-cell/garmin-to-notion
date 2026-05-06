@@ -357,42 +357,119 @@ def sync_hrv(garmin: Garmin, client: Client, garmin_page_id: str, target_date: s
 def sync_body_battery(garmin: Garmin, client: Client, garmin_page_id: str, target_date: str) -> None:
     """Body Battery の 1 日の最高値・最低値を抽出。
 
-    Garmin API レスポンスは `bodyBatteryValuesArray` の中に
-    [timestamp_ms, status, level] の triple が時系列で入っている。
-    `charged` / `drained` フィールドは「日の充電量・消費量」（増分）であり、
-    実レベルではないので使わない。
+    Garmin API のレスポンス形式が複数あり、エンドポイント/バージョンによって
+    返るフィールドが異なる。以下の順で試行する：
+
+    戦略 A：get_user_summary(date) の `bodyBatteryHighestValue` /
+            `bodyBatteryLowestValue`（最も信頼できる。日次サマリ）
+    戦略 B：get_stats(date)（A と同等。実装差吸収用エイリアス）
+    戦略 C：get_body_battery(date) の `bodyBatteryValuesArray`
+            （時系列。新形式の API では含まれず `charged`/`drained` のみ
+             返ることがある）
+    戦略 D：get_body_battery_events(date)（イベント単位、最終フォールバック）
+
+    ※ get_body_battery の `charged`/`drained` は「日の充電量・消費量」（増分）
+       であり、実レベルではないので使わない。
     """
-    try:
-        data = garmin.get_body_battery(target_date)
-        if not data:
-            print("⚠️ Body Battery データなし")
-            return
+    bb_high: int | None = None
+    bb_low: int | None = None
+    method = "(none)"
 
-        all_levels: list[int] = []
-        for day_data in data:
-            if not day_data:
-                continue
-            arr = day_data.get("bodyBatteryValuesArray") or []
-            for entry in arr:
-                if isinstance(entry, list) and len(entry) >= 3:
-                    level = entry[2]
-                    if isinstance(level, (int, float)) and level > 0:
-                        all_levels.append(int(level))
+    def _try_summary(api_name: str, fetcher) -> bool:
+        nonlocal bb_high, bb_low, method
+        try:
+            summary = fetcher()
+        except Exception as e:
+            print(f"  ✗ {api_name} 失敗：{e}")
+            return False
+        if not summary or not isinstance(summary, dict):
+            return False
+        high_v = summary.get("bodyBatteryHighestValue")
+        low_v  = summary.get("bodyBatteryLowestValue")
+        ok = False
+        if isinstance(high_v, (int, float)) and high_v > 0:
+            bb_high = int(high_v)
+            ok = True
+        if isinstance(low_v, (int, float)) and low_v > 0:
+            bb_low = int(low_v)
+            ok = True
+        if ok:
+            method = api_name
+        return ok
 
-        if not all_levels:
-            print(f"⚠️ Body Battery：bodyBatteryValuesArray が空（data keys = "
-                  f"{[list(d.keys())[:5] for d in data if d]}）")
-            return
+    # 戦略 A：get_user_summary
+    if hasattr(garmin, "get_user_summary"):
+        _try_summary("get_user_summary", lambda: garmin.get_user_summary(target_date))
 
-        bb_high = max(all_levels)
-        bb_low  = min(all_levels)
-        update_garmin(client, garmin_page_id, {
-            GP_BB_HIGHEST: {"number": bb_high},
-            GP_BB_LOWEST:  {"number": bb_low},
-        })
-        print(f"✅ Body Battery：最高 {bb_high} / 最低 {bb_low}（{len(all_levels)} データ点）")
-    except Exception as e:
-        print(f"⚠️ Body Batteryデータ取得失敗：{e}")
+    # 戦略 B：get_stats（user_summary 別名）
+    if (bb_high is None or bb_low is None) and hasattr(garmin, "get_stats"):
+        _try_summary("get_stats", lambda: garmin.get_stats(target_date))
+
+    # 戦略 C：get_body_battery の bodyBatteryValuesArray（時系列）
+    if bb_high is None or bb_low is None:
+        try:
+            data = garmin.get_body_battery(target_date)
+            all_levels: list[int] = []
+            if data:
+                for day_data in data:
+                    if not day_data:
+                        continue
+                    arr = day_data.get("bodyBatteryValuesArray") or []
+                    for entry in arr:
+                        if isinstance(entry, list) and len(entry) >= 3:
+                            level = entry[2]
+                            if isinstance(level, (int, float)) and level > 0:
+                                all_levels.append(int(level))
+            if all_levels:
+                if bb_high is None:
+                    bb_high = max(all_levels)
+                if bb_low is None:
+                    bb_low = min(all_levels)
+                if method == "(none)":
+                    method = f"get_body_battery.bodyBatteryValuesArray({len(all_levels)}点)"
+            else:
+                # bodyBatteryValuesArray が無い場合の構造ログ
+                if data:
+                    print(f"  ✗ get_body_battery：bodyBatteryValuesArray なし "
+                          f"(keys = {[list(d.keys())[:6] for d in data if d]})")
+        except Exception as e:
+            print(f"  ✗ get_body_battery 失敗：{e}")
+
+    # 戦略 D：get_body_battery_events（最終フォールバック）
+    if (bb_high is None or bb_low is None) and hasattr(garmin, "get_body_battery_events"):
+        try:
+            events = garmin.get_body_battery_events(target_date)
+            ev_levels: list[int] = []
+            if isinstance(events, list):
+                for ev in events:
+                    if not isinstance(ev, dict):
+                        continue
+                    for k in ("bodyBatteryLevel", "level", "value"):
+                        v = ev.get(k)
+                        if isinstance(v, (int, float)) and v > 0:
+                            ev_levels.append(int(v))
+                            break
+            if ev_levels:
+                if bb_high is None:
+                    bb_high = max(ev_levels)
+                if bb_low is None:
+                    bb_low = min(ev_levels)
+                if method == "(none)":
+                    method = f"get_body_battery_events({len(ev_levels)}点)"
+        except Exception as e:
+            print(f"  ✗ get_body_battery_events 失敗：{e}")
+
+    if bb_high is None and bb_low is None:
+        print("⚠️ Body Battery：A〜D すべての戦略で値を取得できませんでした")
+        return
+
+    props: dict = {}
+    if bb_high is not None:
+        props[GP_BB_HIGHEST] = {"number": bb_high}
+    if bb_low is not None:
+        props[GP_BB_LOWEST] = {"number": bb_low}
+    update_garmin(client, garmin_page_id, props)
+    print(f"✅ Body Battery：最高 {bb_high} / 最低 {bb_low}（method={method}）")
 
 
 def sync_steps(garmin: Garmin, client: Client, garmin_page_id: str, target_date: str) -> None:
