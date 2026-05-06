@@ -125,13 +125,14 @@ def _set_oauth2_from_dict(oauth2_data: dict) -> bool:
 
 
 def get_garmin_client() -> Garmin:
-    """OAuth2 トークンを使って Garmin クライアントを生成する。
+    """OAuth2 / DI トークンを使って Garmin クライアントを生成する。
 
     GitHub Actions では IP が Garmin/Cloudflare でブロックされ、パスワード/MFA
     認証は不可能（CAPTCHA 要求や 429 が返る）。よって GARMIN_TOKENS は必須。
 
-    garminconnect v0.3+ は deprecated garth ではなく独自 client を使うため、
-    g.garth.loads() を最優先で試し、失敗時は旧 garth.client にフォールバックする。
+    garminconnect v0.3+ は deprecated garth ではなく独自 native auth を使い、
+    トークン形式も `{"di_token": ...}` の新形式。canonical なロード方法は
+    `g.login(tokenstore=base64_string)`。これを最優先で試行する。
     """
     tokens = os.getenv("GARMIN_TOKENS")
     if not tokens or not tokens.strip():
@@ -155,22 +156,43 @@ def get_garmin_client() -> Garmin:
         raise RuntimeError("GARMIN_TOKENS をデコードした結果が空。Secret を再確認してください。")
     print(f"  デコード後：{len(raw)} chars（先頭：{raw[:30]}…）")
 
-    g = Garmin()
     last_err: Exception | None = None
 
-    # 戦略 1：g.garth.loads()（garminconnect v0.3+ 内蔵 client）
-    if hasattr(g, "garth") and g.garth is not None and hasattr(g.garth, "loads"):
-        try:
+    # 戦略 A：g.login(tokenstore=base64) — garminconnect v0.3+ 公式 API
+    try:
+        g = Garmin()
+        g.login(tokenstore=tokens)
+        print("✅ 保存済みトークンでログイン成功（g.login(tokenstore=base64)）")
+        return g
+    except Exception as e:
+        last_err = e
+        print(f"  ✗ g.login(tokenstore=base64) 失敗：{e}")
+
+    # 戦略 B：g.login(tokenstore=raw_json)
+    try:
+        g = Garmin()
+        g.login(tokenstore=raw)
+        print("✅ 保存済みトークンでログイン成功（g.login(tokenstore=raw)）")
+        return g
+    except Exception as e:
+        last_err = last_err or e
+        print(f"  ✗ g.login(tokenstore=raw_json) 失敗：{e}")
+
+    # 戦略 C：g.garth.loads()（garminconnect v0.3+ 内蔵 client）
+    try:
+        g = Garmin()
+        if hasattr(g, "garth") and g.garth is not None and hasattr(g.garth, "loads"):
             g.garth.loads(raw)
             if getattr(g.garth, "oauth2_token", None) is not None:
                 print("✅ 保存済みトークンでログイン成功（g.garth.loads）")
                 return g
-        except Exception as e:
-            last_err = e
-            print(f"  ✗ g.garth.loads() 失敗：{e}")
+    except Exception as e:
+        last_err = last_err or e
+        print(f"  ✗ g.garth.loads() 失敗：{e}")
 
-    # 戦略 2：旧 garth.client.loads()（deprecated だが念のため）
+    # 戦略 D：旧 garth.client.loads()（deprecated）
     try:
+        g = Garmin()
         garth.client.loads(raw)
         if garth.client.oauth2_token is not None:
             g.garth = garth.client
@@ -180,8 +202,9 @@ def get_garmin_client() -> Garmin:
         last_err = last_err or e
         print(f"  ✗ garth.client.loads() 失敗：{e}")
 
-    # 戦略 3：手動 JSON パース → OAuth2Token 構築
+    # 戦略 E：手動 JSON パース → OAuth2Token 構築（最終フォールバック）
     try:
+        g = Garmin()
         _try_load_tokens(raw)
         g.garth = garth.client
         print("✅ 保存済みトークンでログイン成功（手動構築・legacy）")
@@ -191,7 +214,8 @@ def get_garmin_client() -> Garmin:
             f"GARMIN_TOKENS のロードに全方法で失敗：{e}\n"
             f"  最初のエラー：{last_err}\n"
             "対処：ローカル PC で `python garmin/generate_garmin_tokens.py` を実行し、"
-            "出力された base64 文字列で GitHub Secrets の GARMIN_TOKENS を更新してください。"
+            "garminconnect ライブラリを最新化（pip install --upgrade garminconnect）した上で、"
+            "新しい base64 文字列で GitHub Secrets の GARMIN_TOKENS を更新してください。"
         ) from e
 
 
