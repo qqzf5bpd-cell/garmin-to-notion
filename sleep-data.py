@@ -198,14 +198,30 @@ def get_garmin_client() -> Garmin:
         except Exception as e:
             b_last_err = e
             emsg = str(e).lower()
+            # ★ 原因チェーンを抽出。garminconnect は HTTP エラーを wrap して
+            # "Failed to retrieve social profile" として再 raise するため、
+            # __cause__ を見ないと 401（revoke）/ 429（rate limit）/ 5xx の
+            # 区別がつかない。これが診断の生命線。
+            cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+            cause_part = ""
+            if cause is not None:
+                cause_part = f"｜原因: {type(cause).__name__}: {cause}"
+                # HTTP レスポンスがあれば status/抜粋も
+                resp = getattr(cause, "response", None)
+                if resp is not None:
+                    try:
+                        body = (resp.text or "")[:200].replace("\n", " ")
+                        cause_part += f"｜HTTP {resp.status_code}: {body}"
+                    except Exception:
+                        pass
             is_transient = any(m in emsg for m in transient_markers)
             if is_transient and attempt < 2:
                 wait = 2 ** attempt + 1  # 2s, 3s
-                print(f"  ⚠️ g.login(tokenstore=raw) 一時的失敗：{e}"
+                print(f"  ⚠️ g.login(tokenstore=raw) 一時的失敗：{e}{cause_part}"
                       f"（{wait}秒待機して再試行 {attempt + 2}/3）")
                 time.sleep(wait)
                 continue
-            print(f"  ✗ g.login(tokenstore=raw_json) 失敗：{e}")
+            print(f"  ✗ g.login(tokenstore=raw_json) 失敗：{e}{cause_part}")
             break
     last_err = last_err or b_last_err
 
@@ -241,15 +257,32 @@ def get_garmin_client() -> Garmin:
         print("✅ 保存済みトークンでログイン成功（手動構築・legacy）")
         return g
     except Exception as e:
-        # 蓄積したエラーから「IP 拒否系」か「トークン形式系」か判定して案内を出し分け
+        # 蓄積したエラーから「リトライ無効な継続障害」「IP 拒否系」「形式系」を判別
         all_errs = " | ".join(filter(None, [str(last_err), str(e)])).lower()
+        # 戦略 B のリトライ 3 回すべてで "social profile" が出たかをカウント
+        # （リトライ 3 回でも回復しない時点で IP 一時拒否ではなくトークン側問題）
+        profile_fail_count = all_errs.count("social profile")
         ip_block_markers = (
-            "social profile", "429", "503", "502", "504",
-            "cloudflare", "timeout", "blocked",
+            "429", "503", "502", "504", "cloudflare", "timeout", "blocked",
         )
         looks_like_ip_block = any(m in all_errs for m in ip_block_markers)
 
-        if looks_like_ip_block:
+        if profile_fail_count >= 2:
+            guidance = (
+                f"戦略 B で 'Failed to retrieve social profile' が {profile_fail_count} 回連続発生。\n"
+                "  指数バックオフ付きリトライでも回復しない継続的失敗のため、以下が疑われます：\n"
+                "    1. di_token がサーバ側で revoke された（最有力。\n"
+                "       Garmin は通常と異なる IP/地域からのアクセスを検知すると\n"
+                "       トークンを無効化する。GitHub Actions runner は US データセンター）\n"
+                "    2. garminconnect / garth のバージョン更新で互換性切れ\n"
+                "  ★最優先で実施★：ローカル PC で\n"
+                "    pip install --upgrade garminconnect garth\n"
+                "    python garmin/generate_garmin_tokens.py\n"
+                "  → 出力された base64 文字列で GitHub Secrets の GARMIN_TOKENS を更新。\n"
+                "  ※ 上のログに `原因: ...HTTP 401:` が出ていれば revoke ほぼ確定。\n"
+                "     `原因: ...HTTP 429/5xx:` ならまだ IP 拒否の可能性あり（再実行で復旧の見込み）。"
+            )
+        elif looks_like_ip_block:
             guidance = (
                 "Garmin/Cloudflare による GitHub Actions IP の一時的拒否が主原因と推定されます。\n"
                 "  対処（推奨順）：\n"
