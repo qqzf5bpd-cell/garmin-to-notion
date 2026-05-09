@@ -19,6 +19,7 @@ from datetime import date, timedelta
 import os
 import json
 import base64
+import time
 
 import garth
 from garth.auth_tokens import OAuth2Token
@@ -111,6 +112,17 @@ def _try_load_tokens(raw: str) -> bool:
             f"（最初の試行 garth.client.loads() のエラー：{last_err}）"
         )
 
+    # 試行 5：dict が新形式 di_token（garminconnect v0.3+ 専用）
+    # この形式は legacy garth.client では扱えない。戦略 A/B（g.login(tokenstore=...)）
+    # で成功する必要があり、戦略 E に来ている時点で IP 拒否等の別要因がほぼ確定。
+    if isinstance(token_data, dict) and "di_token" in token_data:
+        raise RuntimeError(
+            "GARMIN_TOKENS は新形式の di_token トークン（garminconnect v0.3+ 専用）。"
+            "戦略 A/B が失敗してここに到達している場合、トークン形式ではなく "
+            "Garmin/Cloudflare による API 拒否（IP ブロック・レート制限）が主原因。"
+            "数十分〜数時間置いて再実行するか、ローカル PC でトークン再生成を推奨。"
+        )
+
     raise RuntimeError(f"GARMIN_TOKENS の構造が不明: type={type(token_data).__name__}")
 
 
@@ -168,15 +180,34 @@ def get_garmin_client() -> Garmin:
         last_err = e
         print(f"  ✗ g.login(tokenstore=base64) 失敗：{e}")
 
-    # 戦略 B：g.login(tokenstore=raw_json)
-    try:
-        g = Garmin()
-        g.login(tokenstore=raw)
-        print("✅ 保存済みトークンでログイン成功（g.login(tokenstore=raw)）")
-        return g
-    except Exception as e:
-        last_err = last_err or e
-        print(f"  ✗ g.login(tokenstore=raw_json) 失敗：{e}")
+    # 戦略 B：g.login(tokenstore=raw_json) — 指数バックオフ付きリトライ
+    # "Failed to retrieve social profile" / 429 / 503 / Cloudflare はトークン形式
+    # ではなく Garmin 側の一時的拒否なので、待ってリトライすれば成功することが多い。
+    transient_markers = (
+        "social profile", "429", "503", "502", "504",
+        "timeout", "connection", "cloudflare",
+    )
+    b_last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            g = Garmin()
+            g.login(tokenstore=raw)
+            tag = f", attempt={attempt + 1}" if attempt > 0 else ""
+            print(f"✅ 保存済みトークンでログイン成功（g.login(tokenstore=raw){tag}）")
+            return g
+        except Exception as e:
+            b_last_err = e
+            emsg = str(e).lower()
+            is_transient = any(m in emsg for m in transient_markers)
+            if is_transient and attempt < 2:
+                wait = 2 ** attempt + 1  # 2s, 3s
+                print(f"  ⚠️ g.login(tokenstore=raw) 一時的失敗：{e}"
+                      f"（{wait}秒待機して再試行 {attempt + 2}/3）")
+                time.sleep(wait)
+                continue
+            print(f"  ✗ g.login(tokenstore=raw_json) 失敗：{e}")
+            break
+    last_err = last_err or b_last_err
 
     # 戦略 C：g.garth.loads()（garminconnect v0.3+ 内蔵 client）
     try:
@@ -210,12 +241,34 @@ def get_garmin_client() -> Garmin:
         print("✅ 保存済みトークンでログイン成功（手動構築・legacy）")
         return g
     except Exception as e:
+        # 蓄積したエラーから「IP 拒否系」か「トークン形式系」か判定して案内を出し分け
+        all_errs = " | ".join(filter(None, [str(last_err), str(e)])).lower()
+        ip_block_markers = (
+            "social profile", "429", "503", "502", "504",
+            "cloudflare", "timeout", "blocked",
+        )
+        looks_like_ip_block = any(m in all_errs for m in ip_block_markers)
+
+        if looks_like_ip_block:
+            guidance = (
+                "Garmin/Cloudflare による GitHub Actions IP の一時的拒否が主原因と推定されます。\n"
+                "  対処（推奨順）：\n"
+                "    1) Actions タブからワークフローを 数十分〜数時間後に再実行（最も多い解）\n"
+                "    2) それでも復旧しない場合：ローカル PC で\n"
+                "       `python garmin/generate_garmin_tokens.py` を実行してトークン再生成し、\n"
+                "       GitHub Secrets の GARMIN_TOKENS を更新"
+            )
+        else:
+            guidance = (
+                "ローカル PC で `python garmin/generate_garmin_tokens.py` を実行し、"
+                "garminconnect ライブラリを最新化（pip install --upgrade garminconnect）した上で、"
+                "新しい base64 文字列で GitHub Secrets の GARMIN_TOKENS を更新してください。"
+            )
+
         raise RuntimeError(
             f"GARMIN_TOKENS のロードに全方法で失敗：{e}\n"
             f"  最初のエラー：{last_err}\n"
-            "対処：ローカル PC で `python garmin/generate_garmin_tokens.py` を実行し、"
-            "garminconnect ライブラリを最新化（pip install --upgrade garminconnect）した上で、"
-            "新しい base64 文字列で GitHub Secrets の GARMIN_TOKENS を更新してください。"
+            f"対処：{guidance}"
         ) from e
 
 
